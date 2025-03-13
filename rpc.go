@@ -4,15 +4,17 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"os"
+	"time"
 )
 
 // JSON-RPC Request Structure
 type JSONRPCRequest struct {
 	JSONRPC string        `json:"jsonrpc"`
 	Method  string        `json:"method"`
-	//In Go, interface{} (often called the "empty interface") represents a type that can hold any value.
 	Params  []interface{} `json:"params"`
 	ID      int           `json:"id"`
 }
@@ -21,7 +23,7 @@ type JSONRPCRequest struct {
 type JSONRPCResponse struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      int             `json:"id"`
-	Result  json.RawMessage `json:"result"`
+	Result  json.RawMessage `json:"result,omitempty"`
 	Error   *RPCError       `json:"error,omitempty"`
 }
 
@@ -29,15 +31,21 @@ type JSONRPCResponse struct {
 type RPCError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
+	Data    string `json:"data,omitempty"`
 }
 
 // SendRequest sends a JSON-RPC request to the Ethereum node provider
-func SendRequest(method string, params []interface{}) (*JSONRPCResponse, error) {
-	requestBody := map[string]interface{}{
-		"jsonrpc": "2.0",
-		"method":  method,
-		"params":  params,
-		"id":      1, // This can be dynamic or fixed
+func SendRequest(method string, params []interface{}) (json.RawMessage, error) {
+	nodeProvider := os.Getenv("NODE_PROVIDER")
+	if nodeProvider == "" {
+		return nil, fmt.Errorf("missing NODE_PROVIDER in .env")
+	}
+
+	requestBody := JSONRPCRequest{
+		JSONRPC: "2.0",
+		Method:  method,
+		Params:  params,
+		ID:      1,
 	}
 
 	requestJSON, err := json.Marshal(requestBody)
@@ -46,146 +54,90 @@ func SendRequest(method string, params []interface{}) (*JSONRPCResponse, error) 
 		return nil, err
 	}
 
-	resp, err := http.Post(NodeProvider, "application/json", bytes.NewReader(requestJSON))
+	log.Printf("Sending request to Ethereum node: %s", string(requestJSON))
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Post(nodeProvider, "application/json", bytes.NewReader(requestJSON))
 	if err != nil {
 		log.Printf("Error sending request: %v", err)
 		return nil, err
 	}
 	defer resp.Body.Close()
 
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("Error reading response: %v", err)
+		return nil, err
+	}
+
+	log.Printf("Response from Ethereum node: %s", body)
+
 	var jsonResponse JSONRPCResponse
-	if err := json.NewDecoder(resp.Body).Decode(&jsonResponse); err != nil {
+	if err := json.Unmarshal(body, &jsonResponse); err != nil {
 		log.Printf("Error decoding response: %v", err)
 		return nil, err
 	}
 
 	if jsonResponse.Error != nil {
-		return &jsonResponse, fmt.Errorf("RPC error: %v", jsonResponse.Error.Message)
+		return nil, fmt.Errorf("RPC error: %v", jsonResponse.Error.Message)
 	}
 
-	return &jsonResponse, nil
+	return jsonResponse.Result, nil
 }
 
-// eth_blockNumber - Get the latest block number
-func EthBlockNumber(w http.ResponseWriter, r *http.Request) {
-	response, err := SendRequest("eth_blockNumber", nil)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Error calling eth_blockNumber: %v", err), http.StatusInternalServerError)
-		return
-	}
-	json.NewEncoder(w).Encode(response)
+// Ethereum JSON-RPC Methods
+func EthBlockNumber() (json.RawMessage, error) {
+	return SendRequest("eth_blockNumber", nil)
 }
 
-// eth_getBlockByNumber - Get a block by its number
 func EthGetBlockByNumber(blockNumber string) (json.RawMessage, error) {
-	params := []interface{}{blockNumber, true}
-	response, err := SendRequest("eth_getBlockByNumber", params)
-	if err != nil {
-		return nil, err
-	}
-	return response.Result, nil
+	return SendRequest("eth_getBlockByNumber", []interface{}{blockNumber, true})
 }
 
-// eth_getBlockByHash - Get a block by its hash
 func EthGetBlockByHash(blockHash string) (json.RawMessage, error) {
-	params := []interface{}{blockHash, true}
-	response, err := SendRequest("eth_getBlockByHash", params)
-	if err != nil {
-		return nil, err
-	}
-	return response.Result, nil
+	return SendRequest("eth_getBlockByHash", []interface{}{blockHash, true})
 }
 
-// eth_getLogs - Get logs based on filter criteria
 func EthGetLogs(filter interface{}) (json.RawMessage, error) {
-	params := []interface{}{filter}
-	response, err := SendRequest("eth_getLogs", params)
-	if err != nil {
-		return nil, err
-	}
-	return response.Result, nil
+	return SendRequest("eth_getLogs", []interface{}{filter})
 }
 
-// eth_getBalance - Get the balance of an Ethereum address
-func EthGetBalance(address string) (string, error) {
-	params := []interface{}{address, "latest"}
-	response, err := SendRequest("eth_getBalance", params)
-	if err != nil {
-		return "", err
-	}
-	return string(response.Result), nil
+func EthGetBalance(address string) (json.RawMessage, error) {
+	return SendRequest("eth_getBalance", []interface{}{address, "latest"})
 }
 
-// eth_getTransactionCount - Get the number of transactions sent from an address
-func EthGetTransactionCount(address string) (string, error) {
-	params := []interface{}{address, "latest"}
-	response, err := SendRequest("eth_getTransactionCount", params)
-	if err != nil {
-		return "", err
-	}
-	return string(response.Result), nil
+func EthGetTransactionCount(address string) (json.RawMessage, error) {
+	return SendRequest("eth_getTransactionCount", []interface{}{address, "latest"})
 }
 
-// eth_call - Call a contract method (not broadcasting a transaction)
 func EthCall(toAddress string, data string) (json.RawMessage, error) {
 	params := []interface{}{map[string]interface{}{
 		"to":   toAddress,
 		"data": data,
 	}, "latest"}
-	response, err := SendRequest("eth_call", params)
-	if err != nil {
-		return nil, err
-	}
-	return response.Result, nil
+	return SendRequest("eth_call", params)
 }
 
-// eth_estimateGas - Estimate gas usage for a transaction
-func EthEstimateGas(toAddress string, data string) (string, error) {
+func EthEstimateGas(toAddress string, data string) (json.RawMessage, error) {
 	params := []interface{}{map[string]interface{}{
 		"to":   toAddress,
 		"data": data,
 	}}
-	response, err := SendRequest("eth_estimateGas", params)
-	if err != nil {
-		return "", err
-	}
-	return string(response.Result), nil
+	return SendRequest("eth_estimateGas", params)
 }
 
-// eth_gasPrice - Get the current gas price
-func EthGasPrice() (string, error) {
-	response, err := SendRequest("eth_gasPrice", nil)
-	if err != nil {
-		return "", err
-	}
-	return string(response.Result), nil
+func EthGasPrice() (json.RawMessage, error) {
+	return SendRequest("eth_gasPrice", nil)
 }
 
-// eth_sendRawTransaction - Send a raw transaction
-func EthSendRawTransaction(rawTx string) (string, error) {
-	params := []interface{}{rawTx}
-	response, err := SendRequest("eth_sendRawTransaction", params)
-	if err != nil {
-		return "", err
-	}
-	return string(response.Result), nil
+func EthSendRawTransaction(rawTx string) (json.RawMessage, error) {
+	return SendRequest("eth_sendRawTransaction", []interface{}{rawTx})
 }
 
-// eth_getTransactionByHash - Get details of a transaction by its hash
 func EthGetTransactionByHash(txHash string) (json.RawMessage, error) {
-	params := []interface{}{txHash}
-	response, err := SendRequest("eth_getTransactionByHash", params)
-	if err != nil {
-		return nil, err
-	}
-	return response.Result, nil
+	return SendRequest("eth_getTransactionByHash", []interface{}{txHash})
 }
 
-// eth_chainId - Get the chain ID of the current Ethereum network
-func EthChainId() (string, error) {
-	response, err := SendRequest("eth_chainId", nil)
-	if err != nil {
-		return "", err
-	}
-	return string(response.Result), nil
+func EthChainId() (json.RawMessage, error) {
+	return SendRequest("eth_chainId", nil)
 }
